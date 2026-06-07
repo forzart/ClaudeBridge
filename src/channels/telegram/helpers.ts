@@ -5,14 +5,9 @@ import { resolve, isAbsolute } from 'path';
 import { homedir } from 'os';
 import type { SessionManager } from '../../session/manager.js';
 import { getCurrentSessionId, setCurrentSessionId } from '../../session/state.js';
-import { getLatestSession, listAllSessions } from '../../session/resolver.js';
+import { getLatestSession } from '../../session/resolver.js';
 
 export const CHANNEL = 'telegram';
-
-export interface SessionAlias {
-  tag?: string;
-  customTitle?: string;
-}
 
 /** Resolves ~ and validates the path is an existing directory. Relative paths resolve against baseCwd (if given). */
 export function resolveCwd(input: string, baseCwd?: string): string {
@@ -99,16 +94,4 @@ export async function attachOrCreateForCwd(cwd: string): Promise<AttachedSession
   const newId = randomUUID();
   setCurrentSessionId(CHANNEL, cwd, newId);
   return { kind: 'created', sessionId: newId };
-}
-
-/** Looks up a session's tag/customTitle for display; returns empty object on error. */
-export async function lookupAlias(sessionId: string, cwd: string): Promise<SessionAlias> {
-  try {
-    const sessions = await listAllSessions(cwd);
-    const info = sessions.find((s) => s.sessionId === sessionId);
-    if (!info) return {};
-    return { tag: info.tag, customTitle: info.customTitle };
-  } catch {
-    return {};
-  }
 }

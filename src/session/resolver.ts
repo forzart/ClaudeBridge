@@ -56,9 +56,25 @@ export async function listAllSessions(cwd: string): Promise<SDKSessionInfo[]> {
 export function describeSession(s: SDKSessionInfo): string {
   const shortId = s.sessionId.slice(0, 8);
   const alias = s.tag ? `[${s.tag}]` : s.customTitle ? `"${s.customTitle}"` : '';
-  const summary = (s.customTitle ?? s.firstPrompt ?? s.summary ?? '').slice(0, 60);
+  // Avoid repeating customTitle in summary when it's already in `alias`.
+  const summaryRaw = s.tag
+    ? (s.customTitle ?? s.firstPrompt ?? s.summary ?? '')
+    : (s.firstPrompt ?? s.summary ?? '');
+  const summary = summaryRaw.replace(/\s+/g, ' ').slice(0, 60);
   const age = formatAge(Date.now() - s.lastModified);
   return [shortId, alias, summary, `(${age})`].filter(Boolean).join(' ');
+}
+
+/** Like describeSession but resolves by sessionId; falls back to short id when info is missing. */
+export async function describeSessionById(sessionId: string, cwd: string): Promise<string> {
+  try {
+    const sessions = await listSessions({ dir: cwd });
+    const info = sessions.find((s) => s.sessionId === sessionId);
+    if (info) return describeSession(info);
+  } catch {
+    // fall through
+  }
+  return `${sessionId.slice(0, 8)} (no info yet)`;
 }
 
 function formatAge(ms: number): string {

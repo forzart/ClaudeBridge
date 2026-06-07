@@ -12,6 +12,7 @@ import {
   getLatestSession,
   listAllSessions,
   describeSession,
+  describeSessionById,
 } from '../../session/resolver.js';
 import {
   CHANNEL,
@@ -20,7 +21,6 @@ import {
   getActiveSessionIdForCwd,
   isBusy,
   attachOrCreateForCwd,
-  lookupAlias,
 } from './helpers.js';
 
 export interface BotRuntime {
@@ -115,14 +115,14 @@ async function handleCd(ctx: Context, { sessionManager, runtime, reply }: Comman
   }
   runtime.cwd = target;
   const attached = await attachOrCreateForCwd(target);
-  const short = attached.sessionId.slice(0, 8);
-  const status =
+  const desc = await describeSessionById(attached.sessionId, target);
+  const prefix =
     attached.kind === 'remembered'
-      ? `(session ${short})`
+      ? 'session'
       : attached.kind === 'attached-latest'
-        ? `(attached latest ${short})`
-        : `(new session ${short})`;
-  await reply(ctx, `Switched to ${target} ${status}`);
+        ? 'attached latest'
+        : 'new session';
+  await reply(ctx, `Switched to ${target}\n${prefix}: ${desc}`);
 }
 
 async function handleAttach(ctx: Context, { sessionManager, runtime, reply }: CommandDeps): Promise<void> {
@@ -189,15 +189,11 @@ async function handleWhoami(ctx: Context, { runtime, reply }: CommandDeps): Prom
     await reply(ctx, `Cwd: ${cwd}\nSession: (none — next message will create one)`);
     return;
   }
-  const alias = await lookupAlias(current, cwd);
-  const aliasStr = alias.tag
-    ? ` [${alias.tag}]`
-    : alias.customTitle
-      ? ` "${alias.customTitle}"`
-      : '';
+  const desc = await describeSessionById(current, cwd);
   await reply(ctx, [
     `Cwd: ${cwd}`,
-    `Session: ${current}${aliasStr}`,
+    `Session: ${desc}`,
+    `Full ID: ${current}`,
   ].join('\n'));
 }
 

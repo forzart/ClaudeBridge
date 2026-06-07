@@ -14,13 +14,16 @@ export interface SessionAlias {
   customTitle?: string;
 }
 
-/** Resolves ~ and validates the path is an absolute existing directory; throws on bad input. */
-export function resolveCwd(input: string): string {
+/** Resolves ~ and validates the path is an existing directory. Relative paths resolve against baseCwd (if given). */
+export function resolveCwd(input: string, baseCwd?: string): string {
   let path = input;
   if (path === '~' || path.startsWith('~/') || path.startsWith('~\\')) {
     path = resolve(homedir(), path.slice(2) || '.');
   } else if (!isAbsolute(path)) {
-    throw new Error(`Path must be absolute or start with ~/: ${input}`);
+    if (!baseCwd) {
+      throw new Error(`Path must be absolute or start with ~/: ${input}`);
+    }
+    path = resolve(baseCwd, path);
   }
   const normalized = resolve(path);
   if (!existsSync(normalized)) {

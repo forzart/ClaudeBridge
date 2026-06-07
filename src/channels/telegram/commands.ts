@@ -64,7 +64,7 @@ async function handleHelp(ctx: Context, { reply }: CommandDeps): Promise<void> {
   await reply(ctx, [
     'Commands:',
     '/pwd — show current working directory',
-    '/cd <path> — switch working directory',
+    '/cd <path> — switch working directory (absolute, ~/, or relative to current cwd)',
     '/whoami — show current session ID and alias',
     '/list — list sessions in current cwd',
     '/attach [id|alias] — attach to a session (latest if omitted)',
@@ -108,7 +108,7 @@ async function handleCd(ctx: Context, { sessionManager, runtime, reply }: Comman
   }
   let target: string;
   try {
-    target = resolveCwd(arg);
+    target = resolveCwd(arg, runtime.cwd);
   } catch (err: unknown) {
     await reply(ctx, `❌ ${getErrorMessage(err)}`);
     return;

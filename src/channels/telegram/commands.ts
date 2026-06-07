@@ -19,7 +19,7 @@ import {
   getErrorMessage,
   getActiveSessionIdForCwd,
   isBusy,
-  ensureSessionForCwd,
+  attachOrCreateForCwd,
   lookupAlias,
 } from './helpers.js';
 
@@ -114,10 +114,14 @@ async function handleCd(ctx: Context, { sessionManager, runtime, reply }: Comman
     return;
   }
   runtime.cwd = target;
-  const ensured = ensureSessionForCwd(target);
-  const status = ensured.created
-    ? `(new session ${ensured.sessionId.slice(0, 8)})`
-    : `(session ${ensured.sessionId.slice(0, 8)})`;
+  const attached = await attachOrCreateForCwd(target);
+  const short = attached.sessionId.slice(0, 8);
+  const status =
+    attached.kind === 'remembered'
+      ? `(session ${short})`
+      : attached.kind === 'attached-latest'
+        ? `(attached latest ${short})`
+        : `(new session ${short})`;
   await reply(ctx, `Switched to ${target} ${status}`);
 }
 

@@ -5,7 +5,7 @@ import { resolve, isAbsolute } from 'path';
 import { homedir } from 'os';
 import type { SessionManager } from '../../session/manager.js';
 import { getCurrentSessionId, setCurrentSessionId } from '../../session/state.js';
-import { listAllSessions } from '../../session/resolver.js';
+import { getLatestSession, listAllSessions } from '../../session/resolver.js';
 
 export const CHANNEL = 'telegram';
 
@@ -75,6 +75,30 @@ export function ensureSessionForCwd(cwd: string): EnsuredSession {
   const newId = randomUUID();
   setCurrentSessionId(CHANNEL, cwd, newId);
   return { sessionId: newId, created: true };
+}
+
+export type AttachedSession =
+  | { kind: 'remembered'; sessionId: string }
+  | { kind: 'attached-latest'; sessionId: string }
+  | { kind: 'created'; sessionId: string };
+
+/**
+ * Resolves which session this cwd should use after a /cd:
+ * remembered state → newest session on disk → fresh UUID.
+ */
+export async function attachOrCreateForCwd(cwd: string): Promise<AttachedSession> {
+  const remembered = getCurrentSessionId(CHANNEL, cwd);
+  if (remembered) return { kind: 'remembered', sessionId: remembered };
+
+  const latest = await getLatestSession(cwd);
+  if (latest) {
+    setCurrentSessionId(CHANNEL, cwd, latest.sessionId);
+    return { kind: 'attached-latest', sessionId: latest.sessionId };
+  }
+
+  const newId = randomUUID();
+  setCurrentSessionId(CHANNEL, cwd, newId);
+  return { kind: 'created', sessionId: newId };
 }
 
 /** Looks up a session's tag/customTitle for display; returns empty object on error. */

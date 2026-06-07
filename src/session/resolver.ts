@@ -53,28 +53,38 @@ export async function listAllSessions(cwd: string): Promise<SDKSessionInfo[]> {
   return sessions.sort((a, b) => b.lastModified - a.lastModified);
 }
 
-/** One-line Telegram HTML label: <code>id</code> [tag] [title] lastPrompt (age). */
-export function describeSession(s: SDKSessionInfo): string {
-  const shortId = `<code>${s.sessionId.slice(0, 8)}</code>`;
-  const parts: string[] = [shortId];
-  if (s.tag) parts.push(`<b>[${escapeHtml(s.tag)}]</b>`);
-  if (s.customTitle) parts.push(`<i>[${escapeHtml(s.customTitle)}]</i>`);
-  const prompt = getLastUserPrompt(s.sessionId) ?? s.firstPrompt ?? s.summary;
-  if (prompt) parts.push(escapeHtml(truncate(collapse(prompt), 80)));
-  parts.push(`<i>(${formatAge(Date.now() - s.lastModified)})</i>`);
-  return parts.join(' ');
+export interface SessionRow {
+  sessionId: string;
+  tag?: string;
+  customTitle?: string;
+  lastPrompt?: string;
+  lastModified?: number;
+  isCurrent?: boolean;
 }
 
-/** Like describeSession but resolves by sessionId; falls back to short id when info is missing. */
-export async function describeSessionById(sessionId: string, cwd: string): Promise<string> {
+export function sessionInfoToRow(s: SDKSessionInfo, currentSessionId?: string): SessionRow {
+  return {
+    sessionId: s.sessionId,
+    tag: s.tag,
+    customTitle: s.customTitle,
+    lastPrompt: getLastUserPrompt(s.sessionId) ?? s.firstPrompt ?? s.summary,
+    lastModified: s.lastModified,
+    isCurrent: currentSessionId ? s.sessionId === currentSessionId : false,
+  };
+}
+
+/** Renders a single session as a one-row <pre> table with headers; falls back to id-only if not on disk. */
+export async function formatSessionTableById(sessionId: string, cwd: string): Promise<string> {
   try {
     const sessions = await listSessions({ dir: cwd });
     const info = sessions.find((s) => s.sessionId === sessionId);
-    if (info) return describeSession(info);
+    if (info) {
+      return formatSessionsTable([sessionInfoToRow(info)], { showMarker: false });
+    }
   } catch {
     // fall through
   }
-  return `<code>${sessionId.slice(0, 8)}</code> <i>(no info yet)</i>`;
+  return formatSessionsTable([{ sessionId }], { showMarker: false });
 }
 
 function truncate(text: string, max: number): string {
@@ -96,39 +106,59 @@ export { escapeHtml };
 
 interface TableOptions {
   currentSessionId?: string;
+  showMarker?: boolean;
 }
 
-/** Renders sessions as a Telegram <pre> table: marker | id | tag | title | last prompt | age. */
-export function formatSessionsTable(sessions: SDKSessionInfo[], opts: TableOptions = {}): string {
-  const rows = sessions.map((s) => ({
-    marker: s.sessionId === opts.currentSessionId ? '▸' : ' ',
-    id: s.sessionId.slice(0, 8),
-    tag: s.tag ?? '',
-    title: s.customTitle ?? '',
-    prompt: collapse(getLastUserPrompt(s.sessionId) ?? s.firstPrompt ?? s.summary ?? ''),
-    age: formatAge(Date.now() - s.lastModified),
+/** Renders sessions as a Telegram <pre> table with header row: marker | id | tag | title | last prompt | age. */
+export function formatSessionsTable(
+  rows: SessionRow[],
+  opts: TableOptions = {},
+): string {
+  const showMarker = opts.showMarker !== false;
+
+  const cells = rows.map((r) => ({
+    marker: r.isCurrent ? '▸' : ' ',
+    id: r.sessionId.slice(0, 8),
+    tag: r.tag ?? '',
+    title: r.customTitle ?? '',
+    prompt: collapse(r.lastPrompt ?? ''),
+    age: r.lastModified ? formatAge(Date.now() - r.lastModified) : '',
   }));
 
-  const idW = 8;
-  const tagW = clamp(maxLen(rows, 'tag'), 0, 12);
-  const titleW = clamp(maxLen(rows, 'title'), 0, 18);
-  const ageW = clamp(maxLen(rows, 'age'), 3, 6);
-  const promptW = clamp(maxLen(rows, 'prompt'), 10, 36);
+  const headers = {
+    marker: ' ',
+    id: 'ID',
+    tag: 'TAG',
+    title: 'TITLE',
+    prompt: 'LAST PROMPT',
+    age: 'AGE',
+  };
 
-  const lines: string[] = [];
-  for (const r of rows) {
-    const cells = [
-      r.marker,
-      pad(r.id, idW),
-      tagW > 0 ? pad(truncate(r.tag, tagW), tagW) : '',
-      titleW > 0 ? pad(truncate(r.title, titleW), titleW) : '',
-      pad(truncate(r.prompt, promptW), promptW),
-      pad(r.age, ageW),
-    ].filter((c) => c !== '');
-    lines.push(cells.join(' '));
-  }
+  const idW = Math.max(8, headers.id.length);
+  const tagW = clamp(Math.max(maxLen(cells, 'tag'), headers.tag.length), 0, 12);
+  const titleW = clamp(Math.max(maxLen(cells, 'title'), headers.title.length), 0, 18);
+  const ageW = clamp(Math.max(maxLen(cells, 'age'), headers.age.length), 3, 6);
+  const promptW = clamp(Math.max(maxLen(cells, 'prompt'), headers.prompt.length), 10, 36);
 
-  return `<pre>${escapeHtml(lines.join('\n'))}</pre>`;
+  const hasTag = tagW > 0;
+  const hasTitle = titleW > 0;
+
+  const buildRow = (c: typeof headers): string => {
+    const parts: string[] = [];
+    if (showMarker) parts.push(c.marker);
+    parts.push(pad(c.id, idW));
+    if (hasTag) parts.push(pad(truncate(c.tag, tagW), tagW));
+    if (hasTitle) parts.push(pad(truncate(c.title, titleW), titleW));
+    parts.push(pad(truncate(c.prompt, promptW), promptW));
+    parts.push(pad(c.age, ageW));
+    return parts.join(' ');
+  };
+
+  const headerLine = buildRow(headers);
+  const sepLine = '-'.repeat(headerLine.length);
+  const dataLines = cells.map(buildRow);
+
+  return `<pre>${escapeHtml([headerLine, sepLine, ...dataLines].join('\n'))}</pre>`;
 }
 
 function maxLen<K extends string>(rows: Array<Record<K, string>>, key: K): number {

@@ -12,9 +12,9 @@ import {
   resolveSession,
   getLatestSession,
   listAllSessions,
-  describeSession,
-  describeSessionById,
   formatSessionsTable,
+  formatSessionTableById,
+  sessionInfoToRow,
   escapeHtml,
 } from '../../session/resolver.js';
 import {
@@ -87,12 +87,17 @@ async function handleStatus(ctx: Context, { sessionManager, runtime, reply }: Co
     ? new Date(runtime.lastActivityAt).toISOString()
     : 'never';
   const current = getCurrentSessionId(CHANNEL, runtime.cwd);
-  await reply(ctx, [
+  const lines = [
     `<b>Cwd:</b> <code>${escapeHtml(runtime.cwd)}</code>`,
-    `<b>Session:</b> ${current ? `<code>${current.slice(0, 8)}</code>` : '(none)'}`,
     `<b>Running:</b> ${isRunning ? 'yes' : 'no'}`,
     `<b>Last activity:</b> ${last}`,
-  ].join('\n'));
+  ];
+  if (current) {
+    lines.push(await formatSessionTableById(current, runtime.cwd));
+  } else {
+    lines.push('<b>Session:</b> (none)');
+  }
+  await reply(ctx, lines.join('\n'));
 }
 
 async function handlePwd(ctx: Context, { runtime, reply }: CommandDeps): Promise<void> {
@@ -119,14 +124,14 @@ async function handleCd(ctx: Context, { sessionManager, runtime, reply }: Comman
   runtime.cwd = target;
   setCurrentCwd(CHANNEL, target);
   const attached = await attachOrCreateForCwd(target);
-  const desc = await describeSessionById(attached.sessionId, target);
+  const table = await formatSessionTableById(attached.sessionId, target);
   const prefix =
     attached.kind === 'remembered'
       ? 'session'
       : attached.kind === 'attached-latest'
         ? 'attached latest'
         : 'new session';
-  await reply(ctx, `Switched to <code>${escapeHtml(target)}</code>\n<b>${prefix}:</b> ${desc}`);
+  await reply(ctx, `Switched to <code>${escapeHtml(target)}</code>\n<b>${prefix}:</b>\n${table}`);
 }
 
 async function handleAttach(ctx: Context, { sessionManager, runtime, reply }: CommandDeps): Promise<void> {
@@ -144,7 +149,8 @@ async function handleAttach(ctx: Context, { sessionManager, runtime, reply }: Co
       return;
     }
     setCurrentSessionId(CHANNEL, cwd, latest.sessionId);
-    await reply(ctx, `<b>Attached to latest:</b> ${describeSession(latest)}`);
+    const table = formatSessionsTable([sessionInfoToRow(latest)], { showMarker: false });
+    await reply(ctx, `<b>Attached to latest:</b>\n${table}`);
     return;
   }
 
@@ -154,7 +160,8 @@ async function handleAttach(ctx: Context, { sessionManager, runtime, reply }: Co
     return;
   }
   setCurrentSessionId(CHANNEL, cwd, resolved.sessionId);
-  await reply(ctx, `<b>Attached via ${resolved.matched}:</b> ${describeSession(resolved.info)}`);
+  const table = formatSessionsTable([sessionInfoToRow(resolved.info)], { showMarker: false });
+  await reply(ctx, `<b>Attached via ${resolved.matched}:</b>\n${table}`);
 }
 
 async function handleList(ctx: Context, { runtime, reply }: CommandDeps): Promise<void> {
@@ -165,8 +172,8 @@ async function handleList(ctx: Context, { runtime, reply }: CommandDeps): Promis
     return;
   }
   const current = getCurrentSessionId(CHANNEL, cwd);
-  const visible = sessions.slice(0, 10);
-  const table = formatSessionsTable(visible, { currentSessionId: current });
+  const visible = sessions.slice(0, 10).map((s) => sessionInfoToRow(s, current));
+  const table = formatSessionsTable(visible);
   const header = `<b>Sessions in <code>${escapeHtml(cwd)}</code>:</b>`;
   const footer = sessions.length > 10
     ? `\n<i>... and ${sessions.length - 10} more</i>`
@@ -181,7 +188,8 @@ async function handleNew(ctx: Context, { sessionManager, runtime, reply }: Comma
   }
   const newId = randomUUID();
   setCurrentSessionId(CHANNEL, runtime.cwd, newId);
-  await reply(ctx, `<b>New session</b> <code>${newId.slice(0, 8)}</code> ready. Send a message to start.`);
+  const table = formatSessionsTable([{ sessionId: newId }], { showMarker: false });
+  await reply(ctx, `<b>New session ready.</b> Send a message to start.\n${table}`);
 }
 
 async function handleWhoami(ctx: Context, { runtime, reply }: CommandDeps): Promise<void> {
@@ -191,11 +199,11 @@ async function handleWhoami(ctx: Context, { runtime, reply }: CommandDeps): Prom
     await reply(ctx, `<b>Cwd:</b> <code>${escapeHtml(cwd)}</code>\n<b>Session:</b> (none — next message will create one)`);
     return;
   }
-  const desc = await describeSessionById(current, cwd);
+  const table = await formatSessionTableById(current, cwd);
   await reply(ctx, [
     `<b>Cwd:</b> <code>${escapeHtml(cwd)}</code>`,
-    `<b>Session:</b> ${desc}`,
     `<b>Full ID:</b> <code>${current}</code>`,
+    table,
   ].join('\n'));
 }
 

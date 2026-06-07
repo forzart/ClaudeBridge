@@ -135,11 +135,11 @@ export class TelegramBot {
   }
 
   private async reply(ctx: Context, text: string): Promise<void> {
-    await this.enqueueSend(ctx, text);
+    await this.enqueueSend(ctx, text, true);
   }
 
   /** Serializes outbound messages and enforces Telegram's ~1 msg/sec rate limit. */
-  private enqueueSend(ctx: Context, text: string): Promise<void> {
+  private enqueueSend(ctx: Context, text: string, html = false): Promise<void> {
     const send = async (): Promise<void> => {
       for (const part of splitMessage(text)) {
         const elapsed = Date.now() - this.lastSentAt;
@@ -147,7 +147,7 @@ export class TelegramBot {
           await sleep(SEND_INTERVAL_MS - elapsed);
         }
         try {
-          await ctx.reply(part);
+          await ctx.reply(part, html ? { parse_mode: 'HTML' } : undefined);
         } catch (err: unknown) {
           this.logger.error({ err }, 'Telegram sendMessage failed');
         }

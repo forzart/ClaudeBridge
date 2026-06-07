@@ -13,6 +13,7 @@ import {
   listAllSessions,
   describeSession,
   describeSessionById,
+  escapeHtml,
 } from '../../session/resolver.js';
 import {
   CHANNEL,
@@ -51,9 +52,9 @@ export function registerCommands(bot: Bot, deps: CommandDeps): void {
 
 async function handleStart(ctx: Context, { runtime, reply }: CommandDeps): Promise<void> {
   await reply(ctx, [
-    '🌉 ClaudeBridge ready.',
+    '🌉 <b>ClaudeBridge ready.</b>',
     '',
-    `Working directory: ${runtime.cwd}`,
+    `Working directory: <code>${escapeHtml(runtime.cwd)}</code>`,
     '',
     'Send any message to talk to Claude.',
     'Use /help to see available commands.',
@@ -62,9 +63,9 @@ async function handleStart(ctx: Context, { runtime, reply }: CommandDeps): Promi
 
 async function handleHelp(ctx: Context, { reply }: CommandDeps): Promise<void> {
   await reply(ctx, [
-    'Commands:',
+    '<b>Commands:</b>',
     '/pwd — show current working directory',
-    '/cd <path> — switch working directory (absolute, ~/, or relative to current cwd)',
+    '/cd &lt;path&gt; — switch working directory (absolute, ~/, or relative)',
     '/whoami — show current session ID and alias',
     '/list — list sessions in current cwd',
     '/attach [id|alias] — attach to a session (latest if omitted)',
@@ -85,21 +86,21 @@ async function handleStatus(ctx: Context, { sessionManager, runtime, reply }: Co
     : 'never';
   const current = getCurrentSessionId(CHANNEL, runtime.cwd);
   await reply(ctx, [
-    `Cwd: ${runtime.cwd}`,
-    `Session: ${current ? current.slice(0, 8) : '(none)'}`,
-    `Running: ${isRunning ? 'yes' : 'no'}`,
-    `Last activity: ${last}`,
+    `<b>Cwd:</b> <code>${escapeHtml(runtime.cwd)}</code>`,
+    `<b>Session:</b> ${current ? `<code>${current.slice(0, 8)}</code>` : '(none)'}`,
+    `<b>Running:</b> ${isRunning ? 'yes' : 'no'}`,
+    `<b>Last activity:</b> ${last}`,
   ].join('\n'));
 }
 
 async function handlePwd(ctx: Context, { runtime, reply }: CommandDeps): Promise<void> {
-  await reply(ctx, runtime.cwd);
+  await reply(ctx, `<code>${escapeHtml(runtime.cwd)}</code>`);
 }
 
 async function handleCd(ctx: Context, { sessionManager, runtime, reply }: CommandDeps): Promise<void> {
   const arg = ctx.message?.text?.split(/\s+/, 2)[1]?.trim();
   if (!arg) {
-    await reply(ctx, 'Usage: /cd <path>');
+    await reply(ctx, 'Usage: /cd &lt;path&gt;');
     return;
   }
   if (isBusy(sessionManager, runtime.cwd)) {
@@ -110,7 +111,7 @@ async function handleCd(ctx: Context, { sessionManager, runtime, reply }: Comman
   try {
     target = resolveCwd(arg, runtime.cwd);
   } catch (err: unknown) {
-    await reply(ctx, `❌ ${getErrorMessage(err)}`);
+    await reply(ctx, `❌ ${escapeHtml(getErrorMessage(err))}`);
     return;
   }
   runtime.cwd = target;
@@ -122,7 +123,7 @@ async function handleCd(ctx: Context, { sessionManager, runtime, reply }: Comman
       : attached.kind === 'attached-latest'
         ? 'attached latest'
         : 'new session';
-  await reply(ctx, `Switched to ${target}\n${prefix}: ${desc}`);
+  await reply(ctx, `Switched to <code>${escapeHtml(target)}</code>\n<b>${prefix}:</b> ${desc}`);
 }
 
 async function handleAttach(ctx: Context, { sessionManager, runtime, reply }: CommandDeps): Promise<void> {
@@ -140,34 +141,34 @@ async function handleAttach(ctx: Context, { sessionManager, runtime, reply }: Co
       return;
     }
     setCurrentSessionId(CHANNEL, cwd, latest.sessionId);
-    await reply(ctx, `Attached to latest: ${describeSession(latest)}`);
+    await reply(ctx, `<b>Attached to latest:</b> ${describeSession(latest)}`);
     return;
   }
 
   const resolved = await resolveSession(arg, cwd);
   if (!resolved) {
-    await reply(ctx, `❌ No session matches "${arg}" in ${cwd}`);
+    await reply(ctx, `❌ No session matches "${escapeHtml(arg)}" in <code>${escapeHtml(cwd)}</code>`);
     return;
   }
   setCurrentSessionId(CHANNEL, cwd, resolved.sessionId);
-  await reply(ctx, `Attached via ${resolved.matched}: ${describeSession(resolved.info)}`);
+  await reply(ctx, `<b>Attached via ${resolved.matched}:</b> ${describeSession(resolved.info)}`);
 }
 
 async function handleList(ctx: Context, { runtime, reply }: CommandDeps): Promise<void> {
   const cwd = runtime.cwd;
   const sessions = await listAllSessions(cwd);
   if (sessions.length === 0) {
-    await reply(ctx, `No sessions in ${cwd}`);
+    await reply(ctx, `No sessions in <code>${escapeHtml(cwd)}</code>`);
     return;
   }
   const current = getCurrentSessionId(CHANNEL, cwd);
-  const lines = [`Sessions in ${cwd}:`];
+  const lines = [`<b>Sessions in <code>${escapeHtml(cwd)}</code>:</b>`];
   for (const s of sessions.slice(0, 10)) {
     const marker = s.sessionId === current ? '▸' : ' ';
     lines.push(`${marker} ${describeSession(s)}`);
   }
   if (sessions.length > 10) {
-    lines.push(`... and ${sessions.length - 10} more`);
+    lines.push(`<i>... and ${sessions.length - 10} more</i>`);
   }
   await reply(ctx, lines.join('\n'));
 }
@@ -179,21 +180,21 @@ async function handleNew(ctx: Context, { sessionManager, runtime, reply }: Comma
   }
   const newId = randomUUID();
   setCurrentSessionId(CHANNEL, runtime.cwd, newId);
-  await reply(ctx, `New session ${newId.slice(0, 8)} ready. Send a message to start.`);
+  await reply(ctx, `<b>New session</b> <code>${newId.slice(0, 8)}</code> ready. Send a message to start.`);
 }
 
 async function handleWhoami(ctx: Context, { runtime, reply }: CommandDeps): Promise<void> {
   const cwd = runtime.cwd;
   const current = getCurrentSessionId(CHANNEL, cwd);
   if (!current) {
-    await reply(ctx, `Cwd: ${cwd}\nSession: (none — next message will create one)`);
+    await reply(ctx, `<b>Cwd:</b> <code>${escapeHtml(cwd)}</code>\n<b>Session:</b> (none — next message will create one)`);
     return;
   }
   const desc = await describeSessionById(current, cwd);
   await reply(ctx, [
-    `Cwd: ${cwd}`,
-    `Session: ${desc}`,
-    `Full ID: ${current}`,
+    `<b>Cwd:</b> <code>${escapeHtml(cwd)}</code>`,
+    `<b>Session:</b> ${desc}`,
+    `<b>Full ID:</b> <code>${current}</code>`,
   ].join('\n'));
 }
 
@@ -204,7 +205,7 @@ async function handleAbort(ctx: Context, { sessionManager, runtime, reply }: Com
     return;
   }
   sessionManager.abort(sessionId);
-  await reply(ctx, '🛑 Aborted.');
+  await reply(ctx, '🛑 <b>Aborted.</b>');
 }
 
 async function handleReset(ctx: Context, { sessionManager, runtime, reply }: CommandDeps): Promise<void> {
@@ -213,5 +214,5 @@ async function handleReset(ctx: Context, { sessionManager, runtime, reply }: Com
     return;
   }
   clearCurrentSessionId(CHANNEL, runtime.cwd);
-  await reply(ctx, '✅ Session forgotten. Next message starts fresh.');
+  await reply(ctx, '✅ <b>Session forgotten.</b> Next message starts fresh.');
 }

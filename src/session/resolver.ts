@@ -1,5 +1,6 @@
 /** Looks up Claude sessions for a cwd by full UUID, UUID prefix, tag, or customTitle. */
 import { listSessions, type SDKSessionInfo } from '@anthropic-ai/claude-agent-sdk';
+import { getLastUserPrompt } from './jsonl.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -52,17 +53,16 @@ export async function listAllSessions(cwd: string): Promise<SDKSessionInfo[]> {
   return sessions.sort((a, b) => b.lastModified - a.lastModified);
 }
 
-/** One-line human label: short id + alias + summary + relative age. */
+/** One-line Telegram HTML label: <code>id</code> [tag] [title] lastPrompt (age). */
 export function describeSession(s: SDKSessionInfo): string {
-  const shortId = s.sessionId.slice(0, 8);
-  const alias = s.tag ? `[${s.tag}]` : s.customTitle ? `"${s.customTitle}"` : '';
-  // Avoid repeating customTitle in summary when it's already in `alias`.
-  const summaryRaw = s.tag
-    ? (s.customTitle ?? s.firstPrompt ?? s.summary ?? '')
-    : (s.firstPrompt ?? s.summary ?? '');
-  const summary = summaryRaw.replace(/\s+/g, ' ').slice(0, 60);
-  const age = formatAge(Date.now() - s.lastModified);
-  return [shortId, alias, summary, `(${age})`].filter(Boolean).join(' ');
+  const shortId = `<code>${s.sessionId.slice(0, 8)}</code>`;
+  const parts: string[] = [shortId];
+  if (s.tag) parts.push(`<b>[${escapeHtml(s.tag)}]</b>`);
+  if (s.customTitle) parts.push(`<i>[${escapeHtml(s.customTitle)}]</i>`);
+  const prompt = getLastUserPrompt(s.sessionId) ?? s.firstPrompt ?? s.summary;
+  if (prompt) parts.push(escapeHtml(truncate(prompt, 80)));
+  parts.push(`<i>(${formatAge(Date.now() - s.lastModified)})</i>`);
+  return parts.join(' ');
 }
 
 /** Like describeSession but resolves by sessionId; falls back to short id when info is missing. */
@@ -74,8 +74,22 @@ export async function describeSessionById(sessionId: string, cwd: string): Promi
   } catch {
     // fall through
   }
-  return `${sessionId.slice(0, 8)} (no info yet)`;
+  return `<code>${sessionId.slice(0, 8)}</code> <i>(no info yet)</i>`;
 }
+
+function truncate(text: string, max: number): string {
+  const clean = text.replace(/\s+/g, ' ').trim();
+  return clean.length > max ? clean.slice(0, max) + '…' : clean;
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+export { escapeHtml };
 
 function formatAge(ms: number): string {
   const s = Math.floor(ms / 1000);

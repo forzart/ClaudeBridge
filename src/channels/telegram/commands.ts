@@ -6,6 +6,7 @@ import {
   getCurrentSessionId,
   setCurrentSessionId,
   clearCurrentSessionId,
+  setCurrentCwd,
 } from '../../session/state.js';
 import {
   resolveSession,
@@ -13,6 +14,7 @@ import {
   listAllSessions,
   describeSession,
   describeSessionById,
+  formatSessionsTable,
   escapeHtml,
 } from '../../session/resolver.js';
 import {
@@ -115,6 +117,7 @@ async function handleCd(ctx: Context, { sessionManager, runtime, reply }: Comman
     return;
   }
   runtime.cwd = target;
+  setCurrentCwd(CHANNEL, target);
   const attached = await attachOrCreateForCwd(target);
   const desc = await describeSessionById(attached.sessionId, target);
   const prefix =
@@ -162,15 +165,13 @@ async function handleList(ctx: Context, { runtime, reply }: CommandDeps): Promis
     return;
   }
   const current = getCurrentSessionId(CHANNEL, cwd);
-  const lines = [`<b>Sessions in <code>${escapeHtml(cwd)}</code>:</b>`];
-  for (const s of sessions.slice(0, 10)) {
-    const marker = s.sessionId === current ? '▸' : ' ';
-    lines.push(`${marker} ${describeSession(s)}`);
-  }
-  if (sessions.length > 10) {
-    lines.push(`<i>... and ${sessions.length - 10} more</i>`);
-  }
-  await reply(ctx, lines.join('\n'));
+  const visible = sessions.slice(0, 10);
+  const table = formatSessionsTable(visible, { currentSessionId: current });
+  const header = `<b>Sessions in <code>${escapeHtml(cwd)}</code>:</b>`;
+  const footer = sessions.length > 10
+    ? `\n<i>... and ${sessions.length - 10} more</i>`
+    : '';
+  await reply(ctx, `${header}\n${table}${footer}`);
 }
 
 async function handleNew(ctx: Context, { sessionManager, runtime, reply }: CommandDeps): Promise<void> {

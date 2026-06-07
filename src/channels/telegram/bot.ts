@@ -6,7 +6,8 @@ import { resumeSession, startNewSession } from '../../agent/query.js';
 import { formatSdkEvent, splitMessage } from './formatter.js';
 import type { Config } from '../../config-file.js';
 import { registerCommands, type BotRuntime } from './commands.js';
-import { resolveCwd, ensureSessionForCwd, getErrorMessage, sleep } from './helpers.js';
+import { CHANNEL, resolveCwd, ensureSessionForCwd, getErrorMessage, sleep } from './helpers.js';
+import { getCurrentCwd } from '../../session/state.js';
 
 const SEND_INTERVAL_MS = 1100;
 
@@ -25,7 +26,7 @@ export class TelegramBot {
     this.sessionManager = sessionManager;
     this.logger = logger;
     this.runtime = {
-      cwd: resolveCwd(config.cwd),
+      cwd: this.initialCwd(config),
       lastActivityAt: 0,
     };
     this.bot = new Bot(config.botToken);
@@ -69,6 +70,22 @@ export class TelegramBot {
       }
       await next();
     });
+  }
+
+  /** Picks startup cwd: persisted state if valid, else config default. */
+  private initialCwd(config: Config): string {
+    const saved = getCurrentCwd(CHANNEL);
+    if (saved) {
+      try {
+        return resolveCwd(saved);
+      } catch (err: unknown) {
+        this.logger.warn(
+          { saved, err: err instanceof Error ? err.message : err },
+          'Saved cwd is invalid; falling back to config default',
+        );
+      }
+    }
+    return resolveCwd(config.cwd);
   }
 
   /** Handles a non-command text message: resume-or-create session for cwd, stream events back. */

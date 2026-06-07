@@ -60,7 +60,7 @@ export function describeSession(s: SDKSessionInfo): string {
   if (s.tag) parts.push(`<b>[${escapeHtml(s.tag)}]</b>`);
   if (s.customTitle) parts.push(`<i>[${escapeHtml(s.customTitle)}]</i>`);
   const prompt = getLastUserPrompt(s.sessionId) ?? s.firstPrompt ?? s.summary;
-  if (prompt) parts.push(escapeHtml(truncate(prompt, 80)));
+  if (prompt) parts.push(escapeHtml(truncate(collapse(prompt), 80)));
   parts.push(`<i>(${formatAge(Date.now() - s.lastModified)})</i>`);
   return parts.join(' ');
 }
@@ -78,8 +78,11 @@ export async function describeSessionById(sessionId: string, cwd: string): Promi
 }
 
 function truncate(text: string, max: number): string {
-  const clean = text.replace(/\s+/g, ' ').trim();
-  return clean.length > max ? clean.slice(0, max) + '…' : clean;
+  return text.length > max ? text.slice(0, max - 1) + '…' : text;
+}
+
+function collapse(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
 }
 
 function escapeHtml(text: string): string {
@@ -90,6 +93,58 @@ function escapeHtml(text: string): string {
 }
 
 export { escapeHtml };
+
+interface TableOptions {
+  currentSessionId?: string;
+}
+
+/** Renders sessions as a Telegram <pre> table: marker | id | tag | title | last prompt | age. */
+export function formatSessionsTable(sessions: SDKSessionInfo[], opts: TableOptions = {}): string {
+  const rows = sessions.map((s) => ({
+    marker: s.sessionId === opts.currentSessionId ? '▸' : ' ',
+    id: s.sessionId.slice(0, 8),
+    tag: s.tag ?? '',
+    title: s.customTitle ?? '',
+    prompt: collapse(getLastUserPrompt(s.sessionId) ?? s.firstPrompt ?? s.summary ?? ''),
+    age: formatAge(Date.now() - s.lastModified),
+  }));
+
+  const idW = 8;
+  const tagW = clamp(maxLen(rows, 'tag'), 0, 12);
+  const titleW = clamp(maxLen(rows, 'title'), 0, 18);
+  const ageW = clamp(maxLen(rows, 'age'), 3, 6);
+  const promptW = clamp(maxLen(rows, 'prompt'), 10, 36);
+
+  const lines: string[] = [];
+  for (const r of rows) {
+    const cells = [
+      r.marker,
+      pad(r.id, idW),
+      tagW > 0 ? pad(truncate(r.tag, tagW), tagW) : '',
+      titleW > 0 ? pad(truncate(r.title, titleW), titleW) : '',
+      pad(truncate(r.prompt, promptW), promptW),
+      pad(r.age, ageW),
+    ].filter((c) => c !== '');
+    lines.push(cells.join(' '));
+  }
+
+  return `<pre>${escapeHtml(lines.join('\n'))}</pre>`;
+}
+
+function maxLen<K extends string>(rows: Array<Record<K, string>>, key: K): number {
+  let max = 0;
+  for (const r of rows) max = Math.max(max, r[key].length);
+  return max;
+}
+
+function clamp(n: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, n));
+}
+
+function pad(text: string, width: number): string {
+  if (text.length >= width) return text;
+  return text + ' '.repeat(width - text.length);
+}
 
 function formatAge(ms: number): string {
   const s = Math.floor(ms / 1000);

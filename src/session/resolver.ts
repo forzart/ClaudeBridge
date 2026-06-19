@@ -1,6 +1,6 @@
 /** Looks up Claude sessions for a cwd by full UUID, UUID prefix, tag, or customTitle. */
 import { listSessions, type SDKSessionInfo } from '@anthropic-ai/claude-agent-sdk';
-import { getLastUserPrompt } from './jsonl.js';
+import { getLastUserPrompt, getRecentTranscript, type TranscriptMessage } from './jsonl.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -71,6 +71,72 @@ export function sessionInfoToRow(s: SDKSessionInfo, currentSessionId?: string): 
     lastModified: s.lastModified,
     isCurrent: currentSessionId ? s.sessionId === currentSessionId : false,
   };
+}
+
+/** One session as two lines: bold "[index] marker shortid · age" + indented last-prompt snippet. */
+function sessionEntry(row: SessionRow, index?: number): string {
+  const marker = row.isCurrent ? '▸' : '•';
+  const id = row.sessionId.slice(0, 8);
+  const age = row.lastModified ? ` · ${formatAge(Date.now() - row.lastModified)}` : '';
+  const prefix = index !== undefined ? `${index} ` : '';
+  const head = `${prefix}${marker} ${id}${age}`;
+  const prompt = row.lastPrompt ? truncate(collapse(row.lastPrompt), 50) : '(no messages yet)';
+  return `<b>${escapeHtml(head)}</b>\n  ${escapeHtml(prompt)}`;
+}
+
+/**
+ * Mobile-friendly session list (HTML, not a monospace table). Two lines per
+ * session: a bold header (index + marker + short id + age) and the indented
+ * last-prompt snippet. Wraps naturally on narrow screens.
+ */
+export function formatSessionList(rows: SessionRow[]): string {
+  return rows.map((r, i) => sessionEntry(r, i + 1)).join('\n');
+}
+
+/** A single session's detail (no index prefix) — used by /whoami. */
+export function formatSessionDetail(row: SessionRow): string {
+  return sessionEntry(row);
+}
+
+const VIEW_ROUNDS = 5; // last 5 rounds (user → assistant)
+const VIEW_PER_MESSAGE_CAP = 1000; // escaped chars shown per message
+const VIEW_CHUNK_CAP = 3800; // < Telegram's 4096, leaving margin for tags
+
+/** Keeps only the last `rounds` user-led rounds (each user message plus the assistant replies that follow it). */
+function lastRounds(messages: TranscriptMessage[], rounds: number): TranscriptMessage[] {
+  let userSeen = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'user' && ++userSeen === rounds) {
+      return messages.slice(i);
+    }
+  }
+  return messages;
+}
+
+/** Renders a session's recent transcript into Telegram-HTML chunks (each ≤ 4096), never splitting a message mid-tag. */
+export function formatTranscriptChunks(sessionId: string): string[] {
+  const messages = lastRounds(getRecentTranscript(sessionId), VIEW_ROUNDS);
+  if (messages.length === 0) return [];
+
+  const blocks = messages.map((m) => {
+    const who = m.role === 'user' ? '👤 You' : '🤖 Claude';
+    let body = escapeHtml(m.text);
+    if (body.length > VIEW_PER_MESSAGE_CAP) body = body.slice(0, VIEW_PER_MESSAGE_CAP) + '…';
+    return `<b>${who}</b>\n<blockquote>${body}</blockquote>`;
+  });
+
+  const chunks: string[] = [];
+  let current = `<b>📄 Recent · ${escapeHtml(sessionId.slice(0, 8))}</b>`;
+  for (const block of blocks) {
+    if (current.length + 1 + block.length > VIEW_CHUNK_CAP) {
+      chunks.push(current);
+      current = block;
+    } else {
+      current = `${current}\n${block}`;
+    }
+  }
+  chunks.push(current);
+  return chunks;
 }
 
 /** Renders a single session as a one-row <pre> table with headers; falls back to id-only if not on disk. */

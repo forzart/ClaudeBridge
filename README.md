@@ -17,12 +17,12 @@ Both ends read and write the same JSONL session file maintained by Claude Code. 
 ## Features
 
 - **Per-project session memory** — each working directory has its own current session, persisted across restarts
-- **Sync with CLI** — `/attach` to pick up the session your CLI just left, or `/attach <alias>` for a specific one
+- **Sync with CLI** — entering a directory auto-resumes its most recent session (whether started here or by the desktop CLI)
 - **Tool call streaming** — each tool invocation appears as `⚒ Read: file.ts`
 - **Typing indicator** — "is typing…" stays visible while Claude is working
 - **Single-user whitelist** — only your numeric Telegram ID can talk to the bot
 - **Long polling** — no public HTTPS or webhook needed; runs behind any NAT
-- **Project switching** — `/cd <path>` and `/pwd` to navigate
+- **Tap to switch** — `/session` and `/cd` render inline buttons; tap one to switch session or directory
 
 ## Commands
 
@@ -30,12 +30,10 @@ Both ends read and write the same JSONL session file maintained by Claude Code. 
 |---|---|
 | `/pwd` | Show current working directory |
 | `/cd <path>` | Switch working directory |
-| `/whoami` | Show current cwd + session ID + alias |
-| `/list` | List sessions in current cwd |
-| `/attach` | Attach to latest session in current cwd |
-| `/attach <id\|alias>` | Attach by UUID prefix, tag, or customTitle |
+| `/cd` | Show a directory picker (tap a button to switch) |
+| `/session` | List sessions in current cwd; tap a button to switch |
+| `/whoami` | Show current directory, session, and run status |
 | `/new` | Start a fresh session in current cwd |
-| `/status` | Show running state + last activity |
 | `/abort` | Cancel the running query |
 | `/reset` | Forget current session (next message starts fresh) |
 | `/help` | List commands |
@@ -95,8 +93,7 @@ Desktop:  cd ~/repos/myproject
           [50 minutes of coding]
           [walk out]
 
-Phone:    /cd ~/repos/myproject
-          /attach                    ← grabs the session you just left
+Phone:    /cd ~/repos/myproject     ← auto-resumes the session you just left
           continue with the auth refactor
           ⚒ Read: src/auth.ts
           [Claude continues right where CLI left off]

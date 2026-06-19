@@ -54,6 +54,60 @@ export function getLastUserPrompt(sessionId: string): string | undefined {
   return undefined;
 }
 
+export interface TranscriptMessage {
+  role: 'user' | 'assistant';
+  text: string;
+}
+
+/** Returns all user/assistant text messages for sessionId (tool calls/results omitted), oldest first. */
+export function getRecentTranscript(sessionId: string): TranscriptMessage[] {
+  const jsonlPath = findJsonlPath(sessionId);
+  if (!jsonlPath) return [];
+
+  const lines = readFileSync(jsonlPath, 'utf-8').split('\n').filter(Boolean);
+  const messages: TranscriptMessage[] = [];
+  for (const line of lines) {
+    let entry: JournalEntry;
+    try {
+      entry = JSON.parse(line) as JournalEntry;
+    } catch {
+      continue;
+    }
+    if (entry.type === 'user') {
+      const text = extractUserText(entry.message?.content);
+      if (text === undefined || isArtifact(text)) continue;
+      pushMerged(messages, 'user', text);
+    } else if (entry.type === 'assistant') {
+      const text = extractAssistantText(entry.message?.content);
+      if (text === undefined) continue;
+      pushMerged(messages, 'assistant', text);
+    }
+  }
+  return messages;
+}
+
+/** Appends to the last message when it shares the role, so a turn split across JSONL entries stays one block. */
+function pushMerged(messages: TranscriptMessage[], role: 'user' | 'assistant', text: string): void {
+  const last = messages[messages.length - 1];
+  if (last && last.role === role) {
+    messages[messages.length - 1] = { role, text: `${last.text}\n${text}` };
+  } else {
+    messages.push({ role, text });
+  }
+}
+
+function extractAssistantText(content: unknown): string | undefined {
+  if (typeof content === 'string') return content.trim() || undefined;
+  if (!Array.isArray(content)) return undefined;
+  const blocks = content as TextBlock[];
+  const joined = blocks
+    .filter((b) => b.type === 'text' && typeof b.text === 'string')
+    .map((b) => b.text as string)
+    .join('\n')
+    .trim();
+  return joined.length > 0 ? joined : undefined;
+}
+
 function extractUserText(content: unknown): string | undefined {
   if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return undefined;

@@ -13,10 +13,10 @@ export type Config = z.infer<typeof configSchema>;
 
 const CONFIG_PATH = resolve(process.cwd(), 'config.json');
 
-/** Reads ./config.json and validates against the schema. Throws on missing file or invalid shape. */
-export function loadConfig(): Config {
+/** Reads ./config.json and validates it. Returns null when absent (pure multi-bot setups have no legacy config). */
+export function loadConfig(): Config | null {
   if (!existsSync(CONFIG_PATH)) {
-    throw new Error(`Config not found at ${CONFIG_PATH}. Copy config.example.json to config.json and fill it in.`);
+    return null;
   }
   const raw = readFileSync(CONFIG_PATH, 'utf-8');
   const parsed: unknown = JSON.parse(raw);

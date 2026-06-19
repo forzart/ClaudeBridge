@@ -1,13 +1,11 @@
-/** Pure helpers shared between bot.ts and commands.ts — cwd resolution, busy check, session ensure. */
+/** Pure helpers shared between bot.ts and commands.ts — cwd resolution, busy check, session ensure. State is per-bot, keyed by the bot's guid. */
 import { randomUUID } from 'crypto';
 import { existsSync, statSync } from 'fs';
 import { resolve, isAbsolute } from 'path';
 import { homedir } from 'os';
 import type { SessionManager } from '../../session/manager.js';
-import { getCurrentSessionId, setCurrentSessionId } from '../../session/state.js';
+import { getCurrentSessionId, setCurrentSessionId } from './bot-store.js';
 import { getLatestSession } from '../../session/resolver.js';
-
-export const CHANNEL = 'telegram';
 
 /** Resolves ~ and validates the path is an existing directory. Relative paths resolve against baseCwd (if given). */
 export function resolveCwd(input: string, baseCwd?: string): string {
@@ -36,24 +34,33 @@ export function getErrorMessage(err: unknown): string {
   return 'Unknown error';
 }
 
+/** Shortens a path for display by replacing the home-dir prefix with ~. */
+export function prettyPath(p: string): string {
+  const home = homedir();
+  if (p === home) return '~';
+  if (p.startsWith(home + '/')) return '~' + p.slice(home.length);
+  return p;
+}
+
 /** Promise-based sleep used by the rate-limit queue. */
 export function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** Returns the sessionId currently running in this cwd, if any. */
+/** Returns the sessionId currently running for this bot's cwd, if any. */
 export function getActiveSessionIdForCwd(
   sessionManager: SessionManager,
+  botId: string,
   cwd: string,
 ): string | undefined {
-  const sessionId = getCurrentSessionId(CHANNEL, cwd);
+  const sessionId = getCurrentSessionId(botId, cwd);
   if (!sessionId) return undefined;
   return sessionManager.isActive(sessionId) ? sessionId : undefined;
 }
 
-/** True if a Claude query is currently running in this cwd. */
-export function isBusy(sessionManager: SessionManager, cwd: string): boolean {
-  return getActiveSessionIdForCwd(sessionManager, cwd) !== undefined;
+/** True if a Claude query is currently running for this bot's cwd. */
+export function isBusy(sessionManager: SessionManager, botId: string, cwd: string): boolean {
+  return getActiveSessionIdForCwd(sessionManager, botId, cwd) !== undefined;
 }
 
 export interface EnsuredSession {
@@ -61,37 +68,38 @@ export interface EnsuredSession {
   created: boolean;
 }
 
-/** Returns the stored sessionId for this cwd, creating + persisting a fresh UUID if none exists. */
-export function ensureSessionForCwd(cwd: string): EnsuredSession {
-  const existing = getCurrentSessionId(CHANNEL, cwd);
+/** Returns the stored sessionId for this bot+cwd, creating + persisting a fresh UUID if none exists. */
+export function ensureSessionForCwd(botId: string, cwd: string): EnsuredSession {
+  const existing = getCurrentSessionId(botId, cwd);
   if (existing) {
     return { sessionId: existing, created: false };
   }
   const newId = randomUUID();
-  setCurrentSessionId(CHANNEL, cwd, newId);
+  setCurrentSessionId(botId, cwd, newId);
   return { sessionId: newId, created: true };
 }
 
 export type AttachedSession =
-  | { kind: 'remembered'; sessionId: string }
   | { kind: 'attached-latest'; sessionId: string }
   | { kind: 'created'; sessionId: string };
 
 /**
  * Resolves which session this cwd should use after a /cd:
- * remembered state → newest session on disk → fresh UUID.
+ * newest session on disk → fresh UUID.
+ *
+ * Always re-syncs to the most recently modified session in the directory
+ * (including ones created by the desktop CLI), rather than sticking to a
+ * previously-remembered sessionId. Falls back to a fresh UUID only when the
+ * directory has no sessions at all.
  */
-export async function attachOrCreateForCwd(cwd: string): Promise<AttachedSession> {
-  const remembered = getCurrentSessionId(CHANNEL, cwd);
-  if (remembered) return { kind: 'remembered', sessionId: remembered };
-
+export async function attachOrCreateForCwd(botId: string, cwd: string): Promise<AttachedSession> {
   const latest = await getLatestSession(cwd);
   if (latest) {
-    setCurrentSessionId(CHANNEL, cwd, latest.sessionId);
+    setCurrentSessionId(botId, cwd, latest.sessionId);
     return { kind: 'attached-latest', sessionId: latest.sessionId };
   }
 
   const newId = randomUUID();
-  setCurrentSessionId(CHANNEL, cwd, newId);
+  setCurrentSessionId(botId, cwd, newId);
   return { kind: 'created', sessionId: newId };
 }

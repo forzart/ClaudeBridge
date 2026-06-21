@@ -27,7 +27,11 @@ function buildCommonOptions(abortController: AbortController): Record<string, un
     permissionMode: 'bypassPermissions',
     allowDangerouslySkipPermissions: true,
     abortController,
-    includePartialMessages: true,
+    // We render only complete assistant messages (formatSdkEvent ignores partial
+    // stream events). Leaving partials on meant the final text block could arrive
+    // out of band / one turn late, so a reply "went missing" then surfaced on the
+    // next message. Disable partials so each turn's full message is delivered in-band.
+    includePartialMessages: false,
   };
 }
 

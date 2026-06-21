@@ -4,6 +4,7 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 interface ContentBlock {
   type: string;
   text?: string;
+  thinking?: string;
   name?: string;
   input?: Record<string, unknown>;
 }
@@ -13,32 +14,119 @@ interface AssistantMessageEvent {
   message?: {
     content?: ContentBlock[];
   };
+  /** Abnormal-stop code (e.g. 'max_output_tokens', 'rate_limit', 'server_error') when the turn failed. */
+  error?: string;
+}
+
+interface ResultMessageEvent {
+  type: 'result';
+  subtype?: string;
+  is_error?: boolean;
+  errors?: string[];
+  result?: string;
 }
 
 export type FormattedChunk =
   | { kind: 'text'; text: string }
-  | { kind: 'tool'; text: string };
+  | { kind: 'thinking'; text: string }
+  | { kind: 'tool'; text: string }
+  | { kind: 'error'; text: string };
 
-/** Extracts displayable chunks from an SDK event; returns empty when not an assistant message. */
+/** Extracts displayable chunks from an SDK event; surfaces assistant content plus error/result failures that would otherwise be silent. */
 export function formatSdkEvent(event: SDKMessage): FormattedChunk[] {
-  if ((event as AssistantMessageEvent).type !== 'assistant') return [];
-  const content = (event as AssistantMessageEvent).message?.content;
-  if (!Array.isArray(content)) return [];
+  const type = (event as { type?: string }).type;
+  if (type === 'assistant') return formatAssistantEvent(event as AssistantMessageEvent);
+  if (type === 'result') return formatResultEvent(event as ResultMessageEvent);
+  return [];
+}
 
+/** Text/thinking/tool blocks, plus a trailing error chunk if the assistant message stopped abnormally. */
+function formatAssistantEvent(event: AssistantMessageEvent): FormattedChunk[] {
   const chunks: FormattedChunk[] = [];
-  for (const block of content) {
-    if (block.type === 'text' && block.text) {
-      chunks.push({ kind: 'text', text: block.text });
-    } else if (block.type === 'tool_use' && block.name) {
-      chunks.push({ kind: 'tool', text: formatToolUse(block.name, block.input ?? {}) });
+  const content = event.message?.content;
+  if (Array.isArray(content)) {
+    for (const block of content) {
+      if (block.type === 'text' && block.text) {
+        chunks.push({ kind: 'text', text: block.text });
+      } else if (block.type === 'thinking' && block.thinking) {
+        chunks.push({ kind: 'thinking', text: formatThinking(block.thinking) });
+      } else if (block.type === 'tool_use' && block.name) {
+        chunks.push({ kind: 'tool', text: formatToolUse(block.name, block.input ?? {}) });
+      }
     }
   }
+  if (event.error) {
+    chunks.push({ kind: 'error', text: `⚠️ Claude stopped early — ${describeAssistantError(event.error)}.` });
+  }
   return chunks;
+}
+
+/** Success results only echo the already-streamed final text (dropped); error results are surfaced so a failed turn isn't silent. */
+function formatResultEvent(event: ResultMessageEvent): FormattedChunk[] {
+  const isError = event.is_error === true || (event.subtype !== undefined && event.subtype !== 'success');
+  if (!isError) return [];
+  const detail = (event.errors ?? []).filter(Boolean).join('; ');
+  const base = describeResultError(event.subtype);
+  return [{ kind: 'error', text: detail ? `❌ ${base}: ${detail}` : `❌ ${base}.` }];
+}
+
+/** Final assistant text carried by a successful result event — used only as a fallback when nothing streamed. */
+export function resultFallbackText(event: SDKMessage): string | undefined {
+  const e = event as ResultMessageEvent;
+  if (e.type !== 'result' || e.subtype !== 'success') return undefined;
+  const text = e.result?.trim();
+  return text ? text : undefined;
+}
+
+/** Maps an SDKAssistantMessageError code to a human-readable phrase. */
+function describeAssistantError(error: string): string {
+  switch (error) {
+    case 'max_output_tokens':
+      return 'it hit the output-token limit and was cut off (try a shorter ask, or /new)';
+    case 'rate_limit':
+      return 'the API rate-limited the request';
+    case 'billing_error':
+      return 'a billing error occurred';
+    case 'authentication_failed':
+      return 'authentication failed';
+    case 'oauth_org_not_allowed':
+      return 'this organization is not allowed';
+    case 'invalid_request':
+      return 'the request was invalid';
+    case 'server_error':
+      return 'the API had a server error';
+    default:
+      return `it ended with an error (${error})`;
+  }
+}
+
+/** Maps an SDKResultError subtype to a human-readable phrase. */
+function describeResultError(subtype?: string): string {
+  switch (subtype) {
+    case 'error_max_turns':
+      return 'Run hit the maximum number of turns';
+    case 'error_max_budget_usd':
+      return 'Run hit the cost budget';
+    case 'error_during_execution':
+      return 'Run errored during execution';
+    case 'error_max_structured_output_retries':
+      return 'Run exceeded structured-output retries';
+    default:
+      return 'Run ended with an error';
+  }
 }
 
 function formatToolUse(name: string, input: Record<string, unknown>): string {
   const summary = summarizeToolInput(name, input);
   return summary ? `⚒ ${name}: ${summary}` : `⚒ ${name}`;
+}
+
+const THINKING_PREVIEW_LEN = 200;
+
+/** One-line truncated preview of a thinking block, shown like a tool summary (💭). */
+function formatThinking(thinking: string): string {
+  const oneLine = thinking.replace(/\s+/g, ' ').trim();
+  return `💭 ${oneLine.length > THINKING_PREVIEW_LEN ? oneLine.slice(0, THINKING_PREVIEW_LEN) + '…' : oneLine}`;
 }
 
 const MAX_SUMMARY_LEN = 200;

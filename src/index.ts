@@ -3,7 +3,7 @@ import { pino } from 'pino';
 import { loadConfig } from './config-file.js';
 import { SessionManager } from './session/manager.js';
 import { TelegramBot } from './channels/telegram/bot.js';
-import { loadBots, migrateLegacyConfig } from './channels/telegram/bot-store.js';
+import { loadBots, migrateLegacyConfig, type LoadedBot } from './channels/telegram/bot-store.js';
 
 async function main(): Promise<void> {
   const logger = pino({ level: process.env.LOG_LEVEL ?? 'info' });
@@ -30,7 +30,14 @@ async function main(): Promise<void> {
   }
 
   const sessionManager = new SessionManager();
-  const instances = bots.map((bot) => new TelegramBot(bot, sessionManager, logger));
+  const instances: TelegramBot[] = [];
+
+  /** Creates, starts, and tracks a bot instance. Passed into each bot so /newbot can spawn live (no restart). */
+  const spawnBot = async (bot: LoadedBot): Promise<void> => {
+    const instance = new TelegramBot(bot, sessionManager, logger, spawnBot);
+    instances.push(instance);
+    await instance.start();
+  };
 
   const shutdown = async (signal: string): Promise<void> => {
     logger.info(`Received ${signal}, shutting down...`);
@@ -42,7 +49,9 @@ async function main(): Promise<void> {
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
 
-  await Promise.all(instances.map((instance) => instance.start()));
+  for (const bot of bots) {
+    await spawnBot(bot);
+  }
 }
 
 main().catch((err: unknown) => {

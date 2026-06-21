@@ -31,6 +31,15 @@ function findJsonlPath(sessionId: string): string | undefined {
 }
 
 /**
+ * True if a JSONL transcript exists on disk for sessionId — i.e. the session is
+ * real and resumable. A sessionId that was minted (e.g. by /new) but never run
+ * has no JSONL yet, so this returns false and callers must start it fresh.
+ */
+export function sessionExistsOnDisk(sessionId: string): boolean {
+  return findJsonlPath(sessionId) !== undefined;
+}
+
+/**
  * Returns the most recent user prompt for sessionId, or undefined if not found.
  * Skips tool_result messages, command artifacts, and synthetic continuation prompts.
  */

@@ -3,35 +3,56 @@ import { Bot, InlineKeyboard, type Context } from 'grammy';
 import type { Logger } from 'pino';
 import type { SessionManager } from '../../session/manager.js';
 import { resumeSession, startNewSession } from '../../agent/query.js';
-import { formatSdkEvent, splitMessage } from './formatter.js';
+import type { Query } from '@anthropic-ai/claude-agent-sdk';
+import { formatSdkEvent, resultFallbackText, splitMessage } from './formatter.js';
 import { homedir } from 'os';
 import type { LoadedBot } from './bot-store.js';
 import { registerCommands, COMMAND_MENU, type BotRuntime } from './commands.js';
 import { resolveCwd, ensureSessionForCwd, getErrorMessage, prettyPath, sleep } from './helpers.js';
 import { getCurrentCwd, addBot, setCurrentSessionId } from './bot-store.js';
-import { getLatestSession, escapeHtml } from '../../session/resolver.js';
+import { getLatestSession, escapeHtml, sessionExistsOnDisk } from '../../session/resolver.js';
 
 const SEND_INTERVAL_MS = 1100;
+const CONTEXT_WARN_PCT = 80;
+
+/** Sent when a turn finishes cleanly but never produced an assistant text block, so the bot is never silently "done". */
+const NO_TEXT_REPLY_NOTICE =
+  '⚠️ This turn finished without a text reply (it may have been truncated, hit the output-token limit, or only ran tools). Resend, or use /new for a fresh session.';
+
+/** Compact token count for display (1234567 -> "1.2M", 152000 -> "152K"). */
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${Math.round(n / 1_000)}K`;
+  return String(n);
+}
 
 /** Owns one Telegram bot instance and routes its messages to Claude via the SDK. */
 export class TelegramBot {
   private readonly bot: Bot;
   private readonly botConfig: LoadedBot;
+  private readonly spawnBot?: (bot: LoadedBot) => Promise<void>;
   private readonly sessionManager: SessionManager;
   private readonly logger: Logger;
   private readonly runtime: BotRuntime;
   private outboundQueue: Promise<unknown> = Promise.resolve();
   private lastSentAt = 0;
 
-  constructor(botConfig: LoadedBot, sessionManager: SessionManager, logger: Logger) {
+  constructor(
+    botConfig: LoadedBot,
+    sessionManager: SessionManager,
+    logger: Logger,
+    spawnBot?: (bot: LoadedBot) => Promise<void>,
+  ) {
     this.botConfig = botConfig;
     this.sessionManager = sessionManager;
     this.logger = logger;
+    this.spawnBot = spawnBot;
     this.runtime = {
       botId: botConfig.guid,
       cwd: this.initialCwd(botConfig),
       lastActivityAt: 0,
       awaitingNewBotToken: false,
+      highContextWarned: false,
     };
     this.bot = new Bot(botConfig.token);
     this.installAuthGate();
@@ -119,7 +140,10 @@ export class TelegramBot {
 
     const ensured = ensureSessionForCwd(this.runtime.botId, cwd);
     const sessionId = ensured.sessionId;
-    const isResume = !ensured.created;
+    // Resume only when a JSONL transcript actually exists for this id. A session
+    // minted by /new (or a /cd into an empty dir) is persisted but unstarted —
+    // resuming it makes the CLI throw "No conversation found", so start it fresh.
+    const isResume = !ensured.created && sessionExistsOnDisk(sessionId);
 
     if (this.sessionManager.isActive(sessionId)) {
       await this.reply(ctx, 'This session is busy (possibly from another client). /abort to cancel.');
@@ -134,18 +158,25 @@ export class TelegramBot {
       : startNewSession({ prompt, sessionId, cwd, abortController });
 
     const stopTyping = this.startTyping(ctx);
-    let producedText = false;
+    let sawText = false;
+    let sawError = false;
+    let resultText: string | undefined;
     try {
       for await (const event of handle.generator) {
         const chunks = formatSdkEvent(event);
         for (const chunk of chunks) {
-          if (chunk.kind === 'text') producedText = true;
+          if (chunk.kind === 'text') sawText = true;
+          else if (chunk.kind === 'error') sawError = true;
           await this.enqueueSend(ctx, chunk.text);
         }
+        resultText = resultFallbackText(event) ?? resultText;
       }
-      if (!producedText) {
-        await this.enqueueSend(ctx, '✓ Done.');
+      // Nothing streamed and no error surfaced ⇒ recover the final answer from the
+      // result event if it carried one; otherwise tell the user the turn was empty.
+      if (!sawText && !sawError) {
+        await this.enqueueSend(ctx, resultText ?? NO_TEXT_REPLY_NOTICE);
       }
+      await this.warnIfContextHigh(ctx, handle.generator);
     } catch (err: unknown) {
       if (abortController.signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
         // Intentional abort (via /abort, a superseding query, or shutdown) — not a real error.
@@ -178,12 +209,47 @@ export class TelegramBot {
     } catch {
       // no sessions in ~ yet — the first message will start one
     }
+    if (this.spawnBot) {
+      try {
+        await this.spawnBot({ ...record, token });
+      } catch (err: unknown) {
+        await this.reply(ctx, `⚠️ Saved, but couldn't start it live: ${escapeHtml(getErrorMessage(err))}\nA restart will bring it online.`);
+        return;
+      }
+      await this.reply(ctx, [
+        `✅ <b>Bot @${escapeHtml(username ?? '?')} is live.</b>`,
+        `📁 cwd: <code>${escapeHtml(prettyPath(home))}</code>`,
+        'Message it directly — no restart needed.',
+      ].join('\n'));
+      return;
+    }
     await this.reply(ctx, [
       `✅ <b>Bot @${escapeHtml(username ?? '?')} onboarded.</b>`,
       `📁 cwd: <code>${escapeHtml(prettyPath(home))}</code>`,
-      '',
       'Restart ClaudeBridge to bring it online.',
     ].join('\n'));
+  }
+
+  /** After a turn, warns once when the context window crosses CONTEXT_WARN_PCT; re-arms when it drops back. */
+  private async warnIfContextHigh(ctx: Context, generator: Query): Promise<void> {
+    let usage: Awaited<ReturnType<Query['getContextUsage']>>;
+    try {
+      usage = await generator.getContextUsage();
+    } catch (err: unknown) {
+      this.logger.debug({ err }, 'getContextUsage unavailable');
+      return;
+    }
+    if (usage.percentage <= CONTEXT_WARN_PCT) {
+      this.runtime.highContextWarned = false;
+      return;
+    }
+    if (this.runtime.highContextWarned) return;
+    this.runtime.highContextWarned = true;
+    await this.enqueueSend(
+      ctx,
+      `⚠️ <b>Context ${Math.round(usage.percentage)}% full</b> (${fmtTokens(usage.totalTokens)} / ${fmtTokens(usage.maxTokens)}). Reliability drops near the limit — use /new for a fresh session.`,
+      true,
+    );
   }
 
   /** Emits "typing" chat action immediately then every 4s; returns a stop function for finally. */

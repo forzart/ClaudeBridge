@@ -32,6 +32,7 @@ export interface BotRuntime {
   cwd: string;
   lastActivityAt: number;
   awaitingNewBotToken: boolean;
+  highContextWarned: boolean;
 }
 
 export interface CommandDeps {

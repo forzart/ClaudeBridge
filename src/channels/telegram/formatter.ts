@@ -4,7 +4,6 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 interface ContentBlock {
   type: string;
   text?: string;
-  thinking?: string;
   name?: string;
   input?: Record<string, unknown>;
 }
@@ -28,7 +27,6 @@ interface ResultMessageEvent {
 
 export type FormattedChunk =
   | { kind: 'text'; text: string }
-  | { kind: 'thinking'; text: string }
   | { kind: 'tool'; text: string }
   | { kind: 'error'; text: string };
 
@@ -48,8 +46,6 @@ function formatAssistantEvent(event: AssistantMessageEvent): FormattedChunk[] {
     for (const block of content) {
       if (block.type === 'text' && block.text) {
         chunks.push({ kind: 'text', text: block.text });
-      } else if (block.type === 'thinking' && block.thinking) {
-        chunks.push({ kind: 'thinking', text: formatThinking(block.thinking) });
       } else if (block.type === 'tool_use' && block.name) {
         chunks.push({ kind: 'tool', text: formatToolUse(block.name, block.input ?? {}) });
       }
@@ -119,14 +115,6 @@ function describeResultError(subtype?: string): string {
 function formatToolUse(name: string, input: Record<string, unknown>): string {
   const summary = summarizeToolInput(name, input);
   return summary ? `⚒ ${name}: ${summary}` : `⚒ ${name}`;
-}
-
-const THINKING_PREVIEW_LEN = 200;
-
-/** One-line truncated preview of a thinking block, shown like a tool summary (💭). */
-function formatThinking(thinking: string): string {
-  const oneLine = thinking.replace(/\s+/g, ' ').trim();
-  return `💭 ${oneLine.length > THINKING_PREVIEW_LEN ? oneLine.slice(0, THINKING_PREVIEW_LEN) + '…' : oneLine}`;
 }
 
 const MAX_SUMMARY_LEN = 200;

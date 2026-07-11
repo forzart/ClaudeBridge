@@ -47,6 +47,13 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/** Compact token count for display (1234567 -> "1.2M", 152000 -> "152K"). */
+export function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${Math.round(n / 1_000)}K`;
+  return String(n);
+}
+
 /** Returns the sessionId currently running for this bot's cwd, if any. */
 export function getActiveSessionIdForCwd(
   sessionManager: SessionManager,

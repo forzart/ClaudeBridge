@@ -17,6 +17,7 @@ import {
   formatTranscriptChunks,
   sessionInfoToRow,
   escapeHtml,
+  sessionExistsOnDisk,
 } from '../../session/resolver.js';
 import {
   resolveCwd,
@@ -25,7 +26,11 @@ import {
   getActiveSessionIdForCwd,
   isBusy,
   attachOrCreateForCwd,
+  fmtTokens,
 } from './helpers.js';
+import { fetchContextUsage } from '../../agent/query.js';
+import type { SDKControlGetContextUsageResponse } from '@anthropic-ai/claude-agent-sdk';
+import type { TurnCoordinator } from './coordinator.js';
 
 export interface BotRuntime {
   botId: string;
@@ -37,6 +42,7 @@ export interface BotRuntime {
 
 export interface CommandDeps {
   sessionManager: SessionManager;
+  coordinator: TurnCoordinator;
   runtime: BotRuntime;
   reply: (ctx: Context, text: string, keyboard?: InlineKeyboard) => Promise<void>;
 }
@@ -48,6 +54,7 @@ export const COMMAND_MENU: ReadonlyArray<{ command: string; description: string 
   { command: 'session', description: 'List sessions; tap one to switch' },
   { command: 'new', description: 'Start a new session in current cwd' },
   { command: 'whoami', description: 'Show current directory + session + status' },
+  { command: 'ctx', description: 'Show context-window usage' },
   { command: 'abort', description: 'Cancel the running query' },
   { command: 'newbot', description: 'Onboard a new Telegram bot' },
   { command: 'help', description: 'Show available commands' },
@@ -62,6 +69,7 @@ export function registerCommands(bot: Bot, deps: CommandDeps): void {
   bot.command('session', (ctx) => handleSession(ctx, deps));
   bot.command('new', (ctx) => handleNew(ctx, deps));
   bot.command('whoami', (ctx) => handleWhoami(ctx, deps));
+  bot.command('ctx', (ctx) => handleCtx(ctx, deps));
   bot.command('abort', (ctx) => handleAbort(ctx, deps));
   bot.command('newbot', (ctx) => handleNewBot(ctx, deps));
   bot.on('callback_query:data', (ctx) => handleCallback(ctx, deps));
@@ -310,13 +318,60 @@ async function handleWhoami(ctx: Context, { sessionManager, runtime, reply }: Co
   ].join('\n'));
 }
 
-async function handleAbort(ctx: Context, { sessionManager, runtime, reply }: CommandDeps): Promise<void> {
+async function handleCtx(ctx: Context, { sessionManager, runtime, reply }: CommandDeps): Promise<void> {
+  const cwd = runtime.cwd;
+  const sessionId = getCurrentSessionId(runtime.botId, cwd);
+  if (!sessionId || !sessionExistsOnDisk(sessionId)) {
+    await reply(ctx, 'No started session here yet — send a message first, then /ctx.');
+    return;
+  }
+  if (isBusy(sessionManager, runtime.botId, cwd)) {
+    await reply(ctx, 'Claude is busy right now — try /ctx again once the current turn finishes.');
+    return;
+  }
+  try {
+    const usage = await fetchContextUsage({ sessionId, cwd });
+    await reply(ctx, formatContextUsage(usage, sessionId, cwd));
+  } catch (err: unknown) {
+    await reply(ctx, `❌ Couldn't read context usage: ${escapeHtml(getErrorMessage(err))}`);
+  }
+}
+
+const CTX_CATEGORY_PAD = 16;
+const CTX_RULE_WIDTH = 24;
+
+/** Renders an SDK context-usage breakdown as an HTML message with a per-category token table. */
+function formatContextUsage(
+  usage: SDKControlGetContextUsageResponse,
+  sessionId: string,
+  cwd: string,
+): string {
+  const header = `${Math.round(usage.percentage)}% full   ${fmtTokens(usage.totalTokens)} / ${fmtTokens(usage.maxTokens)}`;
+  const rows = usage.categories
+    .filter((c) => c.tokens > 0)
+    .sort((a, b) => b.tokens - a.tokens)
+    .map((c) => `${c.name.padEnd(CTX_CATEGORY_PAD)} ${fmtTokens(c.tokens).padStart(6)}`);
+  const body = rows.length > 0
+    ? `${header}\n${'─'.repeat(CTX_RULE_WIDTH)}\n${rows.join('\n')}`
+    : header;
+  return [
+    '📊 <b>Context usage</b>',
+    `<pre>${escapeHtml(body)}</pre>`,
+    `<code>${escapeHtml(sessionId.slice(0, 8))}</code> · <code>${escapeHtml(prettyPath(cwd))}</code>`,
+  ].join('\n');
+}
+
+async function handleAbort(ctx: Context, { sessionManager, coordinator, runtime, reply }: CommandDeps): Promise<void> {
   const sessionId = getActiveSessionIdForCwd(sessionManager, runtime.botId, runtime.cwd);
   if (!sessionId) {
     await reply(ctx, 'Nothing to abort.');
     return;
   }
-  sessionManager.abort(sessionId);
+  // Coordinator owns our own runs (clears pending + aborts); fall back to the raw
+  // registry for a session held by another client.
+  if (!coordinator.abort(sessionId)) {
+    sessionManager.abort(sessionId);
+  }
   await reply(ctx, '🛑 <b>Aborted.</b>');
 }
 

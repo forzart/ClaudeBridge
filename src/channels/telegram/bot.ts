@@ -8,9 +8,10 @@ import { formatSdkEvent, resultFallbackText, splitMessage } from './formatter.js
 import { homedir } from 'os';
 import type { LoadedBot } from './bot-store.js';
 import { registerCommands, COMMAND_MENU, type BotRuntime } from './commands.js';
-import { resolveCwd, ensureSessionForCwd, getErrorMessage, prettyPath, sleep } from './helpers.js';
+import { resolveCwd, ensureSessionForCwd, getErrorMessage, prettyPath, sleep, fmtTokens } from './helpers.js';
 import { getCurrentCwd, addBot, setCurrentSessionId } from './bot-store.js';
 import { getLatestSession, escapeHtml, sessionExistsOnDisk } from '../../session/resolver.js';
+import { TurnCoordinator, type TurnArgs } from './coordinator.js';
 
 const SEND_INTERVAL_MS = 1100;
 const CONTEXT_WARN_PCT = 80;
@@ -18,13 +19,6 @@ const CONTEXT_WARN_PCT = 80;
 /** Sent when a turn finishes cleanly but never produced an assistant text block, so the bot is never silently "done". */
 const NO_TEXT_REPLY_NOTICE =
   '⚠️ This turn finished without a text reply (it may have been truncated, hit the output-token limit, or only ran tools). Resend, or use /new for a fresh session.';
-
-/** Compact token count for display (1234567 -> "1.2M", 152000 -> "152K"). */
-function fmtTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${Math.round(n / 1_000)}K`;
-  return String(n);
-}
 
 /** Owns one Telegram bot instance and routes its messages to Claude via the SDK. */
 export class TelegramBot {
@@ -34,6 +28,7 @@ export class TelegramBot {
   private readonly sessionManager: SessionManager;
   private readonly logger: Logger;
   private readonly runtime: BotRuntime;
+  private readonly coordinator: TurnCoordinator;
   private outboundQueue: Promise<unknown> = Promise.resolve();
   private lastSentAt = 0;
 
@@ -54,14 +49,23 @@ export class TelegramBot {
       awaitingNewBotToken: false,
       highContextWarned: false,
     };
+    this.coordinator = new TurnCoordinator(this.sessionManager, (args) => this.runTurn(args));
     this.bot = new Bot(botConfig.token);
     this.installAuthGate();
     registerCommands(this.bot, {
       sessionManager: this.sessionManager,
+      coordinator: this.coordinator,
       runtime: this.runtime,
       reply: (ctx, text, keyboard) => this.reply(ctx, text, keyboard),
     });
-    this.bot.on('message:text', (ctx) => this.handlePrompt(ctx));
+    // Non-blocking: hand off to the coordinator and return immediately so grammy
+    // keeps polling — that's what lets a follow-up message (or /abort) arrive while
+    // a turn is still running. (Plain bot.start() processes updates sequentially.)
+    this.bot.on('message:text', (ctx) => {
+      void this.onTextMessage(ctx).catch((err: unknown) => {
+        this.logger.error({ err }, 'message handler failed');
+      });
+    });
   }
 
   /** Starts long polling. Returns once polling is initiated (does not block until shutdown). */
@@ -83,8 +87,9 @@ export class TelegramBot {
     });
   }
 
-  /** Stops polling and waits for in-flight handlers to finish. */
+  /** Aborts in-flight turns (dropping any coalesced follow-ups) then stops polling. */
   async stop(): Promise<void> {
+    this.coordinator.abortAll();
     await this.bot.stop();
   }
 
@@ -118,8 +123,8 @@ export class TelegramBot {
     return resolveCwd(botConfig.cwd ?? homedir());
   }
 
-  /** Handles a non-command text message: resume-or-create session for cwd, stream events back. */
-  private async handlePrompt(ctx: Context): Promise<void> {
+  /** Gate for a non-command text message: onboarding + auth aside, hand it to the coordinator, which coalesces rapid messages. */
+  private async onTextMessage(ctx: Context): Promise<void> {
     const prompt = ctx.message?.text;
     if (!prompt) return;
 
@@ -137,25 +142,26 @@ export class TelegramBot {
 
     this.runtime.lastActivityAt = Date.now();
     const cwd = this.runtime.cwd;
+    const sessionId = ensureSessionForCwd(this.runtime.botId, cwd).sessionId;
 
-    const ensured = ensureSessionForCwd(this.runtime.botId, cwd);
-    const sessionId = ensured.sessionId;
-    // Resume only when a JSONL transcript actually exists for this id. A session
-    // minted by /new (or a /cd into an empty dir) is persisted but unstarted —
-    // resuming it makes the CLI throw "No conversation found", so start it fresh.
-    const isResume = !ensured.created && sessionExistsOnDisk(sessionId);
-
-    if (this.sessionManager.isActive(sessionId)) {
+    // If the session is active but we own no coalescing loop for it, another client
+    // (desktop CLI, another bot) holds it — don't barge in.
+    if (!this.coordinator.has(sessionId) && this.sessionManager.isActive(sessionId)) {
       await this.reply(ctx, 'This session is busy (possibly from another client). /abort to cancel.');
       return;
     }
 
-    const abortController = new AbortController();
-    this.sessionManager.register(sessionId, abortController);
+    this.coordinator.submit({ sessionId, cwd, ctx, prompt });
+  }
 
+  /** Runs one Claude turn for a (possibly coalesced) prompt and streams events back. The coordinator owns SessionManager registration + abort. */
+  private async runTurn({ ctx, sessionId, cwd, prompt, controller }: TurnArgs): Promise<void> {
+    // Resume once a JSONL transcript exists; a freshly-minted id (/new, or /cd into
+    // an empty dir) has none yet, so start it fresh to avoid "No conversation found".
+    const isResume = sessionExistsOnDisk(sessionId);
     const handle = isResume
-      ? resumeSession({ prompt, sessionId, cwd, abortController })
-      : startNewSession({ prompt, sessionId, cwd, abortController });
+      ? resumeSession({ prompt, sessionId, cwd, abortController: controller })
+      : startNewSession({ prompt, sessionId, cwd, abortController: controller });
 
     const stopTyping = this.startTyping(ctx);
     let sawText = false;
@@ -178,15 +184,14 @@ export class TelegramBot {
       }
       await this.warnIfContextHigh(ctx, handle.generator);
     } catch (err: unknown) {
-      if (abortController.signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
-        // Intentional abort (via /abort, a superseding query, or shutdown) — not a real error.
+      if (controller.signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
+        // Intentional abort (newer message coalesced in, /abort, or shutdown) — not a real error.
       } else {
         this.logger.error({ err }, 'Telegram query failed');
         await this.enqueueSend(ctx, `❌ Error: ${getErrorMessage(err)}`);
       }
     } finally {
       stopTyping();
-      this.sessionManager.unregister(sessionId);
       this.runtime.lastActivityAt = Date.now();
     }
   }
